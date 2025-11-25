@@ -16,12 +16,14 @@ app = FastAPI(
 )
 
 # Configure CORS for external frontend
+# IMPORTANT: This must be added BEFORE other middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this with your frontend domain in production
+    allow_origins=["*"],  # In production: ["https://strivyr.com", "https://www.strivyr.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],  # Important: expose all headers to the frontend
 )
 
 class DomainRequest(BaseModel):
