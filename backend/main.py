@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 import asyncio
 import re
+import time
 from typing import Dict, Any
+from collections import defaultdict
 
 from modules.dns_lookup import perform_dns_lookup
 
@@ -20,11 +22,36 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production: ["https://strivyr.com", "https://www.strivyr.com"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,  # Changed from True for security with wildcard origins
+    allow_methods=["POST", "GET", "OPTIONS"],  # Only allow necessary methods
+    allow_headers=["Content-Type"],
     expose_headers=["*"],  # Important: expose all headers to the frontend
 )
+
+# Rate limiting configuration
+rate_limit_store = defaultdict(list)
+MAX_REQUESTS = 30  # Max 30 requests per IP
+TIME_WINDOW = 60  # Per 60 seconds (1 minute)
+
+def check_rate_limit(client_ip: str):
+    """Check if client has exceeded rate limit"""
+    now = time.time()
+
+    # Remove old requests outside the time window
+    rate_limit_store[client_ip] = [
+        timestamp for timestamp in rate_limit_store[client_ip]
+        if now - timestamp < TIME_WINDOW
+    ]
+
+    # Check if limit exceeded
+    if len(rate_limit_store[client_ip]) >= MAX_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum {MAX_REQUESTS} requests per minute."
+        )
+
+    # Add current request
+    rate_limit_store[client_ip].append(now)
 
 class DomainRequest(BaseModel):
     domain: str
@@ -57,10 +84,14 @@ class DomainResponse(BaseModel):
     errors: Dict[str, str] = {}
 
 @app.post("/api/lookup", response_model=DomainResponse)
-async def lookup_domain(request: DomainRequest):
+async def lookup_domain(request: DomainRequest, req: Request):
     """
     Perform comprehensive domain reconnaissance
     """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
     domain = request.domain
 
     # Initialize response structure
