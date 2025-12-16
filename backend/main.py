@@ -186,11 +186,33 @@ async def whois_proxy(request: DomainRequest, req: Request):
                     }
                 }
 
+            if response.status_code == 403:
+                return {
+                    "success": False,
+                    "error": "WHOIS service unavailable. This API may block requests from cloud hosting providers.",
+                    "data": {
+                        "registrant": {},
+                        "registrar": "",
+                        "nameservers": [],
+                        "created": "",
+                        "emails": [],
+                        "organization": ""
+                    }
+                }
+
             if response.status_code != 200:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Who-Dat API error: {response.status_code}"
-                )
+                return {
+                    "success": False,
+                    "error": f"WHOIS API error: {response.status_code}",
+                    "data": {
+                        "registrant": {},
+                        "registrar": "",
+                        "nameservers": [],
+                        "created": "",
+                        "emails": [],
+                        "organization": ""
+                    }
+                }
 
             whois_data = response.json()
 
