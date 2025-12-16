@@ -299,12 +299,35 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
 
             certificates = response.json()
 
-            # Extract unique related domains from certificates
-            related_domains = set()
-            base_domain = domain
-            base_keyword = base_domain.split('.')[0]  # e.g., "google" from "google.com"
+            # Helper function to extract apex/root domain
+            def extract_apex_domain(domain_str: str) -> str:
+                if not domain_str:
+                    return ""
 
-            # Process certificates to find related domains
+                # Remove wildcards and clean up
+                cleaned = domain_str.replace("*.", "").lower().strip()
+                parts = cleaned.split(".")
+
+                if len(parts) < 2:
+                    return cleaned
+
+                # Handle special multi-part TLDs (co.uk, com.au, etc.)
+                special_tlds = ['co.uk', 'com.au', 'co.nz', 'co.za', 'com.br',
+                               'co.jp', 'co.kr', 'gov.uk', 'ac.uk']
+
+                if len(parts) >= 3:
+                    last_two_parts = '.'.join(parts[-2:])
+                    if last_two_parts in special_tlds:
+                        return '.'.join(parts[-3:])
+
+                # Standard TLD - return last 2 parts (domain.tld)
+                return '.'.join(parts[-2:])
+
+            # Extract unique APEX domains only (no subdomains)
+            apex_domains = set()
+            original_apex = extract_apex_domain(domain)
+
+            # Process certificates to find related apex domains
             for cert in certificates:
                 # Extract from common_name
                 if cert.get("common_name"):
@@ -315,11 +338,11 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                         .strip()
                     )
 
-                    # Only include if it's different from base domain
-                    if (clean_domain != base_domain and
-                        base_keyword in clean_domain and
-                        "." in clean_domain):
-                        related_domains.add(clean_domain)
+                    apex = extract_apex_domain(clean_domain)
+
+                    # Only include apex domains that are different from the original
+                    if apex and apex != original_apex and len(apex) >= 3:
+                        apex_domains.add(apex)
 
                 # Extract from Subject Alternative Names (SANs)
                 if cert.get("name_value"):
@@ -331,14 +354,14 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                             .strip()
                         )
 
-                        # Only include if it's different from base domain
-                        if (clean_domain != base_domain and
-                            base_keyword in clean_domain and
-                            "." in clean_domain):
-                            related_domains.add(clean_domain)
+                        apex = extract_apex_domain(clean_domain)
 
-            # Limit to top 10 related domains
-            related_domains_array = list(related_domains)[:10]
+                        # Only include apex domains that are different from the original
+                        if apex and apex != original_apex and len(apex) >= 3:
+                            apex_domains.add(apex)
+
+            # Limit to top 10 unique apex domains
+            related_domains_array = list(apex_domains)[:10]
 
             return {
                 "success": True,
