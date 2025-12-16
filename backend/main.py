@@ -272,7 +272,7 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
     domain = request.domain
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:  # Increased to 30 seconds for crt.sh
             response = await client.get(
                 f"https://crt.sh/?q=%.{domain}&output=json",
                 headers={
