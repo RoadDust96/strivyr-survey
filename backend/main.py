@@ -309,19 +309,60 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 parts = cleaned.split(".")
 
                 if len(parts) < 2:
-                    return cleaned
+                    return ""
 
-                # Handle special multi-part TLDs (co.uk, com.au, etc.)
-                special_tlds = ['co.uk', 'com.au', 'co.nz', 'co.za', 'com.br',
-                               'co.jp', 'co.kr', 'gov.uk', 'ac.uk']
+                # Comprehensive list of multi-part TLDs (ccSLDs and special TLDs)
+                multi_part_tlds = [
+                    # UK
+                    'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'net.uk', 'me.uk',
+                    # Australia
+                    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+                    # New Zealand
+                    'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz',
+                    # South Africa
+                    'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
+                    # Brazil
+                    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+                    # Japan
+                    'co.jp', 'or.jp', 'ne.jp', 'go.jp', 'ac.jp',
+                    # Korea
+                    'co.kr', 'or.kr', 'ne.kr', 'go.kr', 'ac.kr',
+                    # India
+                    'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in',
+                    # Asia/Pacific
+                    'com.sg', 'com.hk', 'com.tw', 'com.my', 'com.ph', 'com.vn', 'com.kh',
+                    # Americas
+                    'com.mx', 'com.ar', 'com.co', 'com.ve', 'com.pe', 'com.pr', 'com.bz', 'com.sv',
+                    # Europe
+                    'com.pl', 'com.tr', 'com.ua', 'com.ru',
+                    # Middle East/Africa
+                    'com.sa', 'com.eg', 'com.ng', 'com.gh', 'com.ke', 'com.ge',
+                    # Other
+                    'com.pk', 'com.bd', 'com.np'
+                ]
 
+                # Check if domain ends with multi-part TLD
                 if len(parts) >= 3:
                     last_two_parts = '.'.join(parts[-2:])
-                    if last_two_parts in special_tlds:
-                        return '.'.join(parts[-3:])
+                    if last_two_parts in multi_part_tlds:
+                        apex = '.'.join(parts[-3:])
+
+                        # Validate: ensure the third-level part is not empty and not just a number
+                        third_level = parts[-3]
+                        if not third_level or len(third_level) < 2 or third_level.isdigit():
+                            return ""  # Invalid
+
+                        return apex
 
                 # Standard TLD - return last 2 parts (domain.tld)
-                return '.'.join(parts[-2:])
+                apex = '.'.join(parts[-2:])
+
+                # Validate: ensure the second-level part is not empty and not just a number
+                second_level = parts[-2]
+                if not second_level or len(second_level) < 2 or second_level.isdigit():
+                    return ""  # Invalid
+
+                return apex
 
             # Extract unique APEX domains only (no subdomains)
             apex_domains = set()
