@@ -4,7 +4,8 @@ from pydantic import BaseModel, validator
 import asyncio
 import re
 import time
-from typing import Dict, Any
+import httpx
+from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
 from modules.dns_lookup import perform_dns_lookup
@@ -135,10 +136,12 @@ async def root():
         "version": "1.0.0",
         "description": "Open-source domain intelligence gathering API",
         "endpoints": {
-            "lookup": "POST /api/lookup",
-            "health": "GET /health",
-            "docs": "GET /docs",
-            "redoc": "GET /redoc"
+            "lookup": "POST /api/lookup - Comprehensive domain reconnaissance",
+            "whois": "POST /api/whois - WHOIS data proxy",
+            "ct-logs": "POST /api/ct-logs - Certificate Transparency logs",
+            "health": "GET /health - Health check",
+            "docs": "GET /docs - Interactive API documentation",
+            "redoc": "GET /redoc - ReDoc documentation"
         }
     }
 
@@ -146,6 +149,201 @@ async def root():
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+@app.post("/api/whois")
+async def whois_proxy(request: DomainRequest, req: Request):
+    """
+    Proxy endpoint for WHOIS data via Who-Dat API
+    Prevents CORS issues when fetching from frontend
+    """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
+    domain = request.domain
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://who-dat.as93.net/{domain}",
+                headers={
+                    "User-Agent": "StrivyrSurvey/1.0",
+                    "Accept": "application/json"
+                }
+            )
+
+            if response.status_code == 429:
+                return {
+                    "success": False,
+                    "error": "Rate limit exceeded. Please try again in a moment.",
+                    "data": {
+                        "registrant": {},
+                        "registrar": "",
+                        "nameservers": [],
+                        "created": "",
+                        "emails": [],
+                        "organization": ""
+                    }
+                }
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Who-Dat API error: {response.status_code}"
+                )
+
+            whois_data = response.json()
+
+            # Normalize the response structure
+            return {
+                "success": True,
+                "data": {
+                    "registrant": whois_data.get("registrant", {}),
+                    "registrar": whois_data.get("registrar", ""),
+                    "nameservers": whois_data.get("nameServers") or whois_data.get("nameservers", []),
+                    "created": whois_data.get("createdDate") or whois_data.get("created", ""),
+                    "emails": whois_data.get("emails", []),
+                    "organization": (
+                        whois_data.get("registrant", {}).get("organization")
+                        or whois_data.get("organization", "")
+                    )
+                }
+            }
+
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "error": "Request timeout",
+            "data": {
+                "registrant": {},
+                "registrar": "",
+                "nameservers": [],
+                "created": "",
+                "emails": [],
+                "organization": ""
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "registrant": {},
+                "registrar": "",
+                "nameservers": [],
+                "created": "",
+                "emails": [],
+                "organization": ""
+            }
+        }
+
+@app.post("/api/ct-logs")
+async def ct_logs_proxy(request: DomainRequest, req: Request):
+    """
+    Proxy endpoint for Certificate Transparency logs via crt.sh
+    Prevents CORS issues when fetching from frontend
+    """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
+    domain = request.domain
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://crt.sh/?q=%.{domain}&output=json",
+                headers={
+                    "User-Agent": "StrivyrSurvey/1.0",
+                    "Accept": "application/json"
+                }
+            )
+
+            if response.status_code == 503:
+                return {
+                    "success": False,
+                    "error": "Certificate Transparency service temporarily unavailable",
+                    "data": {
+                        "certificates": [],
+                        "relatedDomains": []
+                    }
+                }
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"crt.sh API error: {response.status_code}"
+                )
+
+            certificates = response.json()
+
+            # Extract unique related domains from certificates
+            related_domains = set()
+            base_domain = domain
+            base_keyword = base_domain.split('.')[0]  # e.g., "google" from "google.com"
+
+            # Process certificates to find related domains
+            for cert in certificates:
+                # Extract from common_name
+                if cert.get("common_name"):
+                    clean_domain = (
+                        cert["common_name"]
+                        .replace("*.", "")
+                        .lower()
+                        .strip()
+                    )
+
+                    # Only include if it's different from base domain
+                    if (clean_domain != base_domain and
+                        base_keyword in clean_domain and
+                        "." in clean_domain):
+                        related_domains.add(clean_domain)
+
+                # Extract from Subject Alternative Names (SANs)
+                if cert.get("name_value"):
+                    sans = cert["name_value"].split('\n')
+                    for san in sans:
+                        clean_domain = (
+                            san.replace("*.", "")
+                            .lower()
+                            .strip()
+                        )
+
+                        # Only include if it's different from base domain
+                        if (clean_domain != base_domain and
+                            base_keyword in clean_domain and
+                            "." in clean_domain):
+                            related_domains.add(clean_domain)
+
+            # Limit to top 10 related domains
+            related_domains_array = list(related_domains)[:10]
+
+            return {
+                "success": True,
+                "data": {
+                    "certificates": certificates,
+                    "relatedDomains": related_domains_array
+                }
+            }
+
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "error": "Request timeout",
+            "data": {
+                "certificates": [],
+                "relatedDomains": []
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "certificates": [],
+                "relatedDomains": []
+            }
+        }
 
 if __name__ == "__main__":
     import uvicorn
