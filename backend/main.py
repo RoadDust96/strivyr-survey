@@ -299,9 +299,66 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
 
             certificates = response.json()
 
+            # Validate if a string is a valid domain format
+            def is_valid_domain(domain_str: str) -> bool:
+                if not domain_str or not isinstance(domain_str, str):
+                    return False
+
+                # Reject domains with invalid characters (commas, spaces, quotes, parentheses, etc.)
+                if re.search(r'[,\s\'"(){}\[\]<>|\\]', domain_str):
+                    return False
+
+                # Must contain at least one dot
+                if '.' not in domain_str:
+                    return False
+
+                # Must match basic domain format (alphanumeric, dots, hyphens only)
+                if not re.match(r'^[a-z0-9.-]+$', domain_str, re.IGNORECASE):
+                    return False
+
+                # Can't start or end with dot or hyphen
+                if re.match(r'^[.-]|[.-]$', domain_str):
+                    return False
+
+                # Reject consecutive hyphens (e.g., "www--reddit.com")
+                if '--' in domain_str:
+                    return False
+
+                # Reject consecutive dots (e.g., "example..com")
+                if '..' in domain_str:
+                    return False
+
+                return True
+
+            # Infrastructure provider blacklist - these are hosting/CDN services, not related domains
+            infrastructure_providers = {
+                # Cloudflare
+                'cloudflare.com', 'cloudflaressl.com', 'cloudflare.net', 'cloudflare-dns.com',
+                # Akamai
+                'akamai.com', 'akamai.net', 'akamaiedge.net', 'akamaihd.net',
+                # Fastly
+                'fastly.com', 'fastly.net', 'fastlylb.net',
+                # AWS
+                'amazonaws.com', 'awsdns.com', 'awsdns.net', 'awsdns.org',
+                # Other CDN/Cloud
+                'cdn77.com', 'cdn77.net',
+                'cloudfront.net',
+                'googleusercontent.com', 'googleapis.com', 'gstatic.com',
+                'azurewebsites.net', 'azure.com', 'windows.net',
+                'digitaloceanspaces.com', 'digitalocean.com',
+                # SSL/Security
+                'letsencrypt.org', 'digicert.com', 'sectigo.com', 'godaddy.com', 'comodo.com',
+                # Analytics
+                'google-analytics.com', 'googletagmanager.com', 'doubleclick.net', 'googlesyndication.com'
+            }
+
             # Helper function to extract apex/root domain
             def extract_apex_domain(domain_str: str) -> str:
                 if not domain_str:
+                    return ""
+
+                # First validate the domain format
+                if not is_valid_domain(domain_str):
                     return ""
 
                 # Remove wildcards and clean up
@@ -352,6 +409,10 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                         if not third_level or len(third_level) < 2 or third_level.isdigit():
                             return ""  # Invalid
 
+                        # Filter out infrastructure providers
+                        if apex in infrastructure_providers:
+                            return ""  # Blacklisted
+
                         return apex
 
                 # Standard TLD - return last 2 parts (domain.tld)
@@ -361,6 +422,10 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 second_level = parts[-2]
                 if not second_level or len(second_level) < 2 or second_level.isdigit():
                     return ""  # Invalid
+
+                # Filter out infrastructure providers
+                if apex in infrastructure_providers:
+                    return ""  # Blacklisted
 
                 return apex
 
