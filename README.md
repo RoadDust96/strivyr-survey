@@ -5,7 +5,7 @@ An open-source REST API for gathering publicly available information about domai
 ## Features
 
 - **DNS Records Lookup**: A, AAAA, MX, NS, TXT, CNAME, SOA records ✅
-- **WHOIS Information**: Domain registration details via Who-Dat API ✅
+- **WHOIS Information**: Domain registration details via official RDAP protocol ✅
 - **Certificate Transparency**: Subdomain discovery and related domains via crt.sh ✅
 - **Rate Limiting**: 30 requests per minute per IP address ✅
 - **Async Processing**: Parallel lookups using asyncio for maximum performance ✅
@@ -178,7 +178,7 @@ Perform comprehensive domain reconnaissance.
 ```
 
 #### `POST /api/whois`
-Proxy endpoint for WHOIS data via Who-Dat API. Prevents CORS issues when fetching from frontend.
+WHOIS lookup endpoint using official RDAP (Registration Data Access Protocol). Queries official TLD registries for accurate domain registration data.
 
 **Request Body:**
 ```json
