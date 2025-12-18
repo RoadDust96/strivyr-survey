@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
 from modules.dns_lookup import perform_dns_lookup
+from modules.whois_lookup_rdap import lookup_whois
 
 app = FastAPI(
     title="Strivyr Survey API",
@@ -153,8 +154,8 @@ async def health_check():
 @app.post("/api/whois")
 async def whois_proxy(request: DomainRequest, req: Request):
     """
-    Proxy endpoint for WHOIS data via Who-Dat API
-    Prevents CORS issues when fetching from frontend
+    WHOIS lookup endpoint using official RDAP protocol
+    Returns domain registration data for confidence scoring
     """
     # Rate limiting check
     client_ip = req.client.host
@@ -162,102 +163,11 @@ async def whois_proxy(request: DomainRequest, req: Request):
 
     domain = request.domain
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"https://who-dat.as93.net/{domain}",
-                headers={
-                    "User-Agent": "StrivyrSurvey/1.0",
-                    "Accept": "application/json"
-                }
-            )
+    # Use RDAP-based WHOIS lookup
+    result = await lookup_whois(domain)
 
-            if response.status_code == 429:
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded. Please try again in a moment.",
-                    "data": {
-                        "registrant": {},
-                        "registrar": "",
-                        "nameservers": [],
-                        "created": "",
-                        "emails": [],
-                        "organization": ""
-                    }
-                }
-
-            if response.status_code == 403:
-                return {
-                    "success": False,
-                    "error": "WHOIS service unavailable. This API may block requests from cloud hosting providers.",
-                    "data": {
-                        "registrant": {},
-                        "registrar": "",
-                        "nameservers": [],
-                        "created": "",
-                        "emails": [],
-                        "organization": ""
-                    }
-                }
-
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"WHOIS API error: {response.status_code}",
-                    "data": {
-                        "registrant": {},
-                        "registrar": "",
-                        "nameservers": [],
-                        "created": "",
-                        "emails": [],
-                        "organization": ""
-                    }
-                }
-
-            whois_data = response.json()
-
-            # Normalize the response structure
-            return {
-                "success": True,
-                "data": {
-                    "registrant": whois_data.get("registrant", {}),
-                    "registrar": whois_data.get("registrar", ""),
-                    "nameservers": whois_data.get("nameServers") or whois_data.get("nameservers", []),
-                    "created": whois_data.get("createdDate") or whois_data.get("created", ""),
-                    "emails": whois_data.get("emails", []),
-                    "organization": (
-                        whois_data.get("registrant", {}).get("organization")
-                        or whois_data.get("organization", "")
-                    )
-                }
-            }
-
-    except httpx.TimeoutException:
-        return {
-            "success": False,
-            "error": "Request timeout",
-            "data": {
-                "registrant": {},
-                "registrar": "",
-                "nameservers": [],
-                "created": "",
-                "emails": [],
-                "organization": ""
-            }
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "data": {
-                "registrant": {},
-                "registrar": "",
-                "nameservers": [],
-                "created": "",
-                "emails": [],
-                "organization": ""
-            }
-        }
+    # Return result (already in correct format from RDAP module)
+    return result
 
 @app.post("/api/ct-logs")
 async def ct_logs_proxy(request: DomainRequest, req: Request):
