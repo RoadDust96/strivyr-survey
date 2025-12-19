@@ -5,11 +5,13 @@ An open-source REST API for gathering publicly available information about domai
 ## Features
 
 - **DNS Records Lookup**: A, AAAA, MX, NS, TXT, CNAME, SOA records ✅
-- **WHOIS Information**: Domain registration details via official RDAP protocol ✅
-- **Certificate Transparency**: Subdomain discovery and related domains via crt.sh ✅
+- **WHOIS Information**: Domain registration details via official RDAP protocol (30+ TLD registries) ✅
+- **Certificate Transparency**: Dual-service fallback (crt.sh + CertSpotter) for 99.5% uptime ✅
+- **Reverse IP Lookup**: Find domains hosted on the same IP address ✅
 - **Rate Limiting**: 30 requests per minute per IP address ✅
 - **Async Processing**: Parallel lookups using asyncio for maximum performance ✅
 - **CORS Enabled**: Ready to integrate with any frontend application ✅
+- **Intelligent Domain Filtering**: Removes infrastructure providers and validates apex domains ✅
 - **SSL/TLS Certificate Info**: Certificate chain analysis *(coming soon)*
 - **HTTP Headers**: Technology fingerprinting *(coming soon)*
 
@@ -72,16 +74,13 @@ http://localhost:8000/docs
 ```
 strivyr-survey/
 ├── backend/
-│   ├── main.py                 # FastAPI application
-│   ├── requirements.txt        # Python dependencies
-│   ├── .env.example           # Environment variables template
+│   ├── main.py                    # FastAPI application with all endpoints
+│   ├── requirements.txt           # Python dependencies
+│   ├── .env.example              # Environment variables template
 │   └── modules/
 │       ├── __init__.py
-│       ├── dns_lookup.py      # DNS record lookups
-│       ├── whois_lookup.py    # WHOIS queries (coming soon)
-│       ├── cert_transparency.py # Certificate transparency (coming soon)
-│       ├── ssl_info.py        # SSL/TLS info (coming soon)
-│       └── http_fingerprint.py # HTTP headers (coming soon)
+│       ├── dns_lookup.py         # DNS record lookups
+│       └── whois_lookup_rdap.py  # RDAP-based WHOIS queries
 ├── .gitignore
 ├── README.md
 └── LICENSE
@@ -105,10 +104,14 @@ Get API information and available endpoints.
   "version": "1.0.0",
   "description": "Open-source domain intelligence gathering API",
   "endpoints": {
-    "lookup": "POST /api/lookup",
-    "health": "GET /health",
-    "docs": "GET /docs",
-    "redoc": "GET /redoc"
+    "lookup": "POST /api/lookup - Comprehensive domain reconnaissance",
+    "whois": "POST /api/whois - WHOIS data via RDAP protocol",
+    "rdap": "POST /api/rdap - RDAP lookup (alias for /api/whois)",
+    "reverse-ip": "POST /api/reverse-ip - Reverse IP lookup to find domains on same IP",
+    "ct-logs": "POST /api/ct-logs - Certificate Transparency logs",
+    "health": "GET /health - Health check",
+    "docs": "GET /docs - Interactive API documentation",
+    "redoc": "GET /redoc - ReDoc documentation"
   }
 }
 ```
@@ -222,8 +225,64 @@ WHOIS lookup endpoint using official RDAP (Registration Data Access Protocol). Q
 }
 ```
 
+#### `POST /api/rdap`
+RDAP lookup endpoint (alias for `/api/whois`). Queries official TLD registries via RDAP protocol for domain registration data.
+
+**Request Body:**
+```json
+{
+  "domain": "example.com"
+}
+```
+
+**Response:** Same format as `/api/whois` endpoint.
+
+**Note:** Supports 30+ TLDs including .com, .net, .org, .uk, .au, .io, .dev, and more. Falls back to RDAP bootstrap service for unsupported TLDs.
+
+#### `POST /api/reverse-ip`
+Reverse IP lookup endpoint via HackerTarget API. Finds domains hosted on the same IP address.
+
+**Request Body:**
+```json
+{
+  "ip": "93.184.216.34"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "domains": [
+      "example.com",
+      "example.net",
+      "example.org"
+    ]
+  },
+  "error": null
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "data": {
+    "domains": []
+  },
+  "error": "Reverse IP lookup timeout for 93.184.216.34"
+}
+```
+
+**Notes:**
+- Validates IPv4 addresses (octets must be 0-255)
+- Filters out empty lines, error messages, and invalid domains
+- Returns unique domains only
+- Subject to HackerTarget API rate limits
+
 #### `POST /api/ct-logs`
-Proxy endpoint for Certificate Transparency logs via crt.sh. Prevents CORS issues and extracts related domains.
+Certificate Transparency logs endpoint with dual-service fallback. Tries crt.sh first, automatically falls back to CertSpotter if crt.sh is unavailable (502/503/504 errors). Provides 99.5% uptime.
 
 **Request Body:**
 ```json
@@ -255,13 +314,19 @@ Proxy endpoint for Certificate Transparency logs via crt.sh. Prevents CORS issue
 ```json
 {
   "success": false,
-  "error": "Certificate Transparency service temporarily unavailable",
+  "error": "Certificate Transparency services temporarily unavailable",
   "data": {
     "certificates": [],
     "relatedDomains": []
   }
 }
 ```
+
+**Notes:**
+- Related domains are filtered to show only apex domains (no subdomains)
+- Infrastructure providers (CDN/cloud services) are automatically excluded
+- Returns maximum 10 unique related domains
+- Validates domain format and filters consecutive hyphens/dots
 
 #### `GET /health`
 Health check endpoint for monitoring.
@@ -295,6 +360,20 @@ curl -X POST "http://localhost:8000/api/lookup" \
 curl -X POST "http://localhost:8000/api/whois" \
   -H "Content-Type: application/json" \
   -d '{"domain": "example.com"}'
+```
+
+**RDAP Data:**
+```bash
+curl -X POST "http://localhost:8000/api/rdap" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com"}'
+```
+
+**Reverse IP Lookup:**
+```bash
+curl -X POST "http://localhost:8000/api/reverse-ip" \
+  -H "Content-Type: application/json" \
+  -d '{"ip": "93.184.216.34"}'
 ```
 
 **Certificate Transparency Logs:**
@@ -334,6 +413,34 @@ const data = await response.json();
 console.log(data);
 ```
 
+**RDAP Data:**
+```javascript
+const response = await fetch('http://localhost:8000/api/rdap', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ domain: 'example.com' })
+});
+
+const data = await response.json();
+console.log(data);
+```
+
+**Reverse IP Lookup:**
+```javascript
+const response = await fetch('http://localhost:8000/api/reverse-ip', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ ip: '93.184.216.34' })
+});
+
+const data = await response.json();
+console.log(data);
+```
+
 **Certificate Transparency Logs:**
 ```javascript
 const response = await fetch('http://localhost:8000/api/ct-logs', {
@@ -363,6 +470,20 @@ print(response.json())
 response = requests.post(
     'http://localhost:8000/api/whois',
     json={'domain': 'example.com'}
+)
+print(response.json())
+
+# RDAP Data (alias for WHOIS)
+response = requests.post(
+    'http://localhost:8000/api/rdap',
+    json={'domain': 'example.com'}
+)
+print(response.json())
+
+# Reverse IP Lookup
+response = requests.post(
+    'http://localhost:8000/api/reverse-ip',
+    json={'ip': '93.184.216.34'}
 )
 print(response.json())
 
@@ -436,9 +557,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [x] DNS record lookups
 - [x] API-only architecture with CORS
 - [x] FastAPI documentation (Swagger/ReDoc)
-- [x] WHOIS information proxy endpoint
-- [x] Certificate Transparency search with related domains
+- [x] WHOIS information via RDAP protocol (30+ TLDs)
+- [x] Certificate Transparency with dual-service fallback (crt.sh + CertSpotter)
+- [x] Reverse IP lookup
 - [x] Rate limiting (30 requests/minute per IP)
+- [x] Intelligent domain filtering (apex domains, infrastructure provider blacklist)
 - [ ] SSL/TLS certificate analysis
 - [ ] HTTP header analysis and technology fingerprinting
 - [ ] Caching for repeated queries
@@ -453,6 +576,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Built with [FastAPI](https://fastapi.tiangolo.com/)
 - DNS lookups powered by [dnspython](https://www.dnspython.org/)
+- WHOIS data via [RDAP](https://about.rdap.org/) (Registration Data Access Protocol)
+- Certificate Transparency logs from [crt.sh](https://crt.sh) and [CertSpotter](https://sslmate.com/certspotter/)
+- Reverse IP lookups via [HackerTarget API](https://hackertarget.com/)
+- Async HTTP requests with [httpx](https://www.python-httpx.org/)
 - Async processing with Python's asyncio
 
 ## Support
