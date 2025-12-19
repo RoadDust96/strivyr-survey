@@ -69,10 +69,33 @@ class DomainRequest(BaseModel):
         # Remove www. prefix for consistency
         v = re.sub(r'^www\.', '', v)
 
-        # Basic domain format validation
+        # Basic domain format validation (max 253 chars)
+        if len(v) > 253:
+            raise ValueError('Domain name too long (max 253 characters)')
+
         domain_pattern = r'^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
         if not re.match(domain_pattern, v):
             raise ValueError('Invalid domain format')
+
+        return v
+
+class IPRequest(BaseModel):
+    ip: str
+
+    @validator('ip')
+    def validate_ip(cls, v):
+        # Validate IPv4 format
+        v = v.strip()
+        ipv4_pattern = r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$'
+        match = re.match(ipv4_pattern, v)
+
+        if not match:
+            raise ValueError('Invalid IPv4 address format')
+
+        # Validate each octet is 0-255
+        for octet in match.groups():
+            if int(octet) > 255:
+                raise ValueError('Invalid IPv4 address (octets must be 0-255)')
 
         return v
 
@@ -138,7 +161,9 @@ async def root():
         "description": "Open-source domain intelligence gathering API",
         "endpoints": {
             "lookup": "POST /api/lookup - Comprehensive domain reconnaissance",
-            "whois": "POST /api/whois - WHOIS data proxy",
+            "whois": "POST /api/whois - WHOIS data via RDAP protocol",
+            "rdap": "POST /api/rdap - RDAP lookup (alias for /api/whois)",
+            "reverse-ip": "POST /api/reverse-ip - Reverse IP lookup to find domains on same IP",
             "ct-logs": "POST /api/ct-logs - Certificate Transparency logs",
             "health": "GET /health - Health check",
             "docs": "GET /docs - Interactive API documentation",
@@ -168,6 +193,111 @@ async def whois_proxy(request: DomainRequest, req: Request):
 
     # Return result (already in correct format from RDAP module)
     return result
+
+@app.post("/api/rdap")
+async def rdap_proxy(request: DomainRequest, req: Request):
+    """
+    RDAP lookup endpoint (alias for /api/whois)
+    Queries official TLD registries via RDAP protocol
+    """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
+    domain = request.domain
+
+    # Use RDAP-based WHOIS lookup
+    result = await lookup_whois(domain)
+
+    # Return result (already in correct format from RDAP module)
+    return result
+
+@app.post("/api/reverse-ip")
+async def reverse_ip_lookup(request: IPRequest, req: Request):
+    """
+    Reverse IP lookup endpoint via HackerTarget API
+    Finds domains hosted on the same IP address
+    """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
+    ip = request.ip
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://api.hackertarget.com/reverseiplookup/?q={ip}",
+                follow_redirects=True
+            )
+
+            if response.status_code == 429:
+                return {
+                    "success": False,
+                    "data": {
+                        "domains": []
+                    },
+                    "error": f"Reverse IP lookup failed for {ip} (429 Too Many Requests)"
+                }
+
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "data": {
+                        "domains": []
+                    },
+                    "error": f"Reverse IP lookup failed for {ip} ({response.status_code})"
+                }
+
+            text = response.text.strip()
+
+            # Check for error responses
+            if "error" in text.lower() or "invalid" in text.lower():
+                return {
+                    "success": False,
+                    "data": {
+                        "domains": []
+                    },
+                    "error": f"Reverse IP lookup returned error for {ip}"
+                }
+
+            # Parse text response (one domain per line)
+            lines = text.split('\n')
+            domains = []
+
+            for line in lines:
+                line = line.strip()
+                # Filter out empty lines, error messages, and invalid domains
+                if line and not line.startswith("error") and '.' in line:
+                    domains.append(line)
+
+            # Remove duplicates
+            unique_domains = list(set(domains))
+
+            return {
+                "success": True,
+                "data": {
+                    "domains": unique_domains
+                },
+                "error": None
+            }
+
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "data": {
+                "domains": []
+            },
+            "error": f"Reverse IP lookup timeout for {ip}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "data": {
+                "domains": []
+            },
+            "error": f"Reverse IP lookup error for {ip}: {str(e)}"
+        }
 
 @app.post("/api/ct-logs")
 async def ct_logs_proxy(request: DomainRequest, req: Request):
