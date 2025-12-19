@@ -321,7 +321,8 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 }
             )
 
-            if response.status_code == 503:
+            # Handle common server errors from crt.sh
+            if response.status_code in [502, 503, 504]:
                 return {
                     "success": False,
                     "error": "Certificate Transparency service temporarily unavailable",
@@ -332,10 +333,14 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 }
 
             if response.status_code != 200:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"crt.sh API error: {response.status_code}"
-                )
+                return {
+                    "success": False,
+                    "error": f"Certificate Transparency service error ({response.status_code})",
+                    "data": {
+                        "certificates": [],
+                        "relatedDomains": []
+                    }
+                }
 
             certificates = response.json()
 
