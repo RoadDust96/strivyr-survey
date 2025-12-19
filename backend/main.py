@@ -10,6 +10,9 @@ from collections import defaultdict
 
 from modules.dns_lookup import perform_dns_lookup
 from modules.whois_lookup_rdap import lookup_whois
+import logging
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Strivyr Survey API",
