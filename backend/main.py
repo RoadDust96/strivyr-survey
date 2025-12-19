@@ -302,20 +302,204 @@ async def reverse_ip_lookup(request: IPRequest, req: Request):
             "error": f"Reverse IP lookup error for {ip}: {str(e)}"
         }
 
-@app.post("/api/ct-logs")
-async def ct_logs_proxy(request: DomainRequest, req: Request):
-    """
-    Proxy endpoint for Certificate Transparency logs via crt.sh
-    Prevents CORS issues when fetching from frontend
-    """
-    # Rate limiting check
-    client_ip = req.client.host
-    check_rate_limit(client_ip)
+# Helper functions for Certificate Transparency
 
-    domain = request.domain
+def is_valid_domain(domain_str: str) -> bool:
+    """Validate if a string is a valid domain format"""
+    if not domain_str or not isinstance(domain_str, str):
+        return False
 
+    # Reject domains with invalid characters (commas, spaces, quotes, parentheses, etc.)
+    if re.search(r'[,\s\'"(){}\[\]<>|\\]', domain_str):
+        return False
+
+    # Must contain at least one dot
+    if '.' not in domain_str:
+        return False
+
+    # Must match basic domain format (alphanumeric, dots, hyphens only)
+    if not re.match(r'^[a-z0-9.-]+$', domain_str, re.IGNORECASE):
+        return False
+
+    # Can't start or end with dot or hyphen
+    if re.match(r'^[.-]|[.-]$', domain_str):
+        return False
+
+    # Reject consecutive hyphens (e.g., "www--reddit.com")
+    if '--' in domain_str:
+        return False
+
+    # Reject consecutive dots (e.g., "example..com")
+    if '..' in domain_str:
+        return False
+
+    return True
+
+
+# Infrastructure provider blacklist - these are hosting/CDN services, not related domains
+INFRASTRUCTURE_PROVIDERS = {
+    # Cloudflare
+    'cloudflare.com', 'cloudflaressl.com', 'cloudflare.net', 'cloudflare-dns.com',
+    # Akamai
+    'akamai.com', 'akamai.net', 'akamaiedge.net', 'akamaihd.net',
+    # Fastly
+    'fastly.com', 'fastly.net', 'fastlylb.net',
+    # AWS
+    'amazonaws.com', 'awsdns.com', 'awsdns.net', 'awsdns.org',
+    # Other CDN/Cloud
+    'cdn77.com', 'cdn77.net',
+    'cloudfront.net',
+    'googleusercontent.com', 'googleapis.com', 'gstatic.com',
+    'azurewebsites.net', 'azure.com', 'windows.net',
+    'digitaloceanspaces.com', 'digitalocean.com',
+    # SSL/Security
+    'letsencrypt.org', 'digicert.com', 'sectigo.com', 'godaddy.com', 'comodo.com',
+    # Analytics
+    'google-analytics.com', 'googletagmanager.com', 'doubleclick.net', 'googlesyndication.com'
+}
+
+# Comprehensive list of multi-part TLDs (ccSLDs and special TLDs)
+MULTI_PART_TLDS = [
+    # UK
+    'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'net.uk', 'me.uk',
+    # Australia
+    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+    # New Zealand
+    'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz',
+    # South Africa
+    'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
+    # Brazil
+    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+    # Japan
+    'co.jp', 'or.jp', 'ne.jp', 'go.jp', 'ac.jp',
+    # Korea
+    'co.kr', 'or.kr', 'ne.kr', 'go.kr', 'ac.kr',
+    # India
+    'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in',
+    # Asia/Pacific
+    'com.sg', 'com.hk', 'com.tw', 'com.my', 'com.ph', 'com.vn', 'com.kh',
+    # Americas
+    'com.mx', 'com.ar', 'com.co', 'com.ve', 'com.pe', 'com.pr', 'com.bz', 'com.sv',
+    # Europe
+    'com.pl', 'com.tr', 'com.ua', 'com.ru',
+    # Middle East/Africa
+    'com.sa', 'com.eg', 'com.ng', 'com.gh', 'com.ke', 'com.ge',
+    # Other
+    'com.pk', 'com.bd', 'com.np'
+]
+
+
+def extract_apex_domain(domain_str: str) -> str:
+    """Extract apex/root domain from a domain string"""
+    if not domain_str:
+        return ""
+
+    # First validate the domain format
+    if not is_valid_domain(domain_str):
+        return ""
+
+    # Remove wildcards and clean up
+    cleaned = domain_str.replace("*.", "").lower().strip()
+    parts = cleaned.split(".")
+
+    if len(parts) < 2:
+        return ""
+
+    # Check if domain ends with multi-part TLD
+    if len(parts) >= 3:
+        last_two_parts = '.'.join(parts[-2:])
+        if last_two_parts in MULTI_PART_TLDS:
+            apex = '.'.join(parts[-3:])
+
+            # Validate: ensure the third-level part is not empty and not just a number
+            third_level = parts[-3]
+            if not third_level or len(third_level) < 2 or third_level.isdigit():
+                return ""  # Invalid
+
+            # Filter out infrastructure providers
+            if apex in INFRASTRUCTURE_PROVIDERS:
+                return ""  # Blacklisted
+
+            return apex
+
+    # Standard TLD - return last 2 parts (domain.tld)
+    apex = '.'.join(parts[-2:])
+
+    # Validate: ensure the second-level part is not empty and not just a number
+    second_level = parts[-2]
+    if not second_level or len(second_level) < 2 or second_level.isdigit():
+        return ""  # Invalid
+
+    # Filter out infrastructure providers
+    if apex in INFRASTRUCTURE_PROVIDERS:
+        return ""  # Blacklisted
+
+    return apex
+
+
+def filter_and_validate_domains(certificates: List[Dict], original_domain: str) -> List[str]:
+    """
+    Extract and validate unique apex domains from certificate data
+
+    Args:
+        certificates: List of certificate dictionaries
+        original_domain: The original queried domain to exclude
+
+    Returns:
+        List of unique apex domains (max 10)
+    """
+    apex_domains = set()
+    original_apex = extract_apex_domain(original_domain)
+
+    # Process certificates to find related apex domains
+    for cert in certificates:
+        # Extract from common_name
+        if cert.get("common_name"):
+            clean_domain = (
+                cert["common_name"]
+                .replace("*.", "")
+                .lower()
+                .strip()
+            )
+
+            apex = extract_apex_domain(clean_domain)
+
+            # Only include apex domains that are different from the original
+            if apex and apex != original_apex and len(apex) >= 3:
+                apex_domains.add(apex)
+
+        # Extract from Subject Alternative Names (SANs)
+        if cert.get("name_value"):
+            sans = cert["name_value"].split('\n')
+            for san in sans:
+                clean_domain = (
+                    san.replace("*.", "")
+                    .lower()
+                    .strip()
+                )
+
+                apex = extract_apex_domain(clean_domain)
+
+                # Only include apex domains that are different from the original
+                if apex and apex != original_apex and len(apex) >= 3:
+                    apex_domains.add(apex)
+
+    # Limit to top 10 unique apex domains
+    return list(apex_domains)[:10]
+
+
+async def fetch_crtsh(domain: str) -> Dict:
+    """
+    Fetch Certificate Transparency logs from crt.sh
+
+    Args:
+        domain: Domain name to query
+
+    Returns:
+        Dict with success status, certificates data, and related domains
+    """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:  # Increased to 30 seconds for crt.sh
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"https://crt.sh/?q=%.{domain}&output=json",
                 headers={
@@ -326,9 +510,10 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
 
             # Handle common server errors from crt.sh
             if response.status_code in [502, 503, 504]:
+                logger.warning(f"crt.sh server error {response.status_code} for {domain}")
                 return {
                     "success": False,
-                    "error": "Certificate Transparency service temporarily unavailable",
+                    "error": f"crt.sh server error ({response.status_code})",
                     "data": {
                         "certificates": [],
                         "relatedDomains": []
@@ -336,9 +521,10 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 }
 
             if response.status_code != 200:
+                logger.error(f"crt.sh returned {response.status_code} for {domain}")
                 return {
                     "success": False,
-                    "error": f"Certificate Transparency service error ({response.status_code})",
+                    "error": f"crt.sh error ({response.status_code})",
                     "data": {
                         "certificates": [],
                         "relatedDomains": []
@@ -346,203 +532,163 @@ async def ct_logs_proxy(request: DomainRequest, req: Request):
                 }
 
             certificates = response.json()
+            related_domains = filter_and_validate_domains(certificates, domain)
 
-            # Validate if a string is a valid domain format
-            def is_valid_domain(domain_str: str) -> bool:
-                if not domain_str or not isinstance(domain_str, str):
-                    return False
-
-                # Reject domains with invalid characters (commas, spaces, quotes, parentheses, etc.)
-                if re.search(r'[,\s\'"(){}\[\]<>|\\]', domain_str):
-                    return False
-
-                # Must contain at least one dot
-                if '.' not in domain_str:
-                    return False
-
-                # Must match basic domain format (alphanumeric, dots, hyphens only)
-                if not re.match(r'^[a-z0-9.-]+$', domain_str, re.IGNORECASE):
-                    return False
-
-                # Can't start or end with dot or hyphen
-                if re.match(r'^[.-]|[.-]$', domain_str):
-                    return False
-
-                # Reject consecutive hyphens (e.g., "www--reddit.com")
-                if '--' in domain_str:
-                    return False
-
-                # Reject consecutive dots (e.g., "example..com")
-                if '..' in domain_str:
-                    return False
-
-                return True
-
-            # Infrastructure provider blacklist - these are hosting/CDN services, not related domains
-            infrastructure_providers = {
-                # Cloudflare
-                'cloudflare.com', 'cloudflaressl.com', 'cloudflare.net', 'cloudflare-dns.com',
-                # Akamai
-                'akamai.com', 'akamai.net', 'akamaiedge.net', 'akamaihd.net',
-                # Fastly
-                'fastly.com', 'fastly.net', 'fastlylb.net',
-                # AWS
-                'amazonaws.com', 'awsdns.com', 'awsdns.net', 'awsdns.org',
-                # Other CDN/Cloud
-                'cdn77.com', 'cdn77.net',
-                'cloudfront.net',
-                'googleusercontent.com', 'googleapis.com', 'gstatic.com',
-                'azurewebsites.net', 'azure.com', 'windows.net',
-                'digitaloceanspaces.com', 'digitalocean.com',
-                # SSL/Security
-                'letsencrypt.org', 'digicert.com', 'sectigo.com', 'godaddy.com', 'comodo.com',
-                # Analytics
-                'google-analytics.com', 'googletagmanager.com', 'doubleclick.net', 'googlesyndication.com'
-            }
-
-            # Helper function to extract apex/root domain
-            def extract_apex_domain(domain_str: str) -> str:
-                if not domain_str:
-                    return ""
-
-                # First validate the domain format
-                if not is_valid_domain(domain_str):
-                    return ""
-
-                # Remove wildcards and clean up
-                cleaned = domain_str.replace("*.", "").lower().strip()
-                parts = cleaned.split(".")
-
-                if len(parts) < 2:
-                    return ""
-
-                # Comprehensive list of multi-part TLDs (ccSLDs and special TLDs)
-                multi_part_tlds = [
-                    # UK
-                    'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'net.uk', 'me.uk',
-                    # Australia
-                    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
-                    # New Zealand
-                    'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz',
-                    # South Africa
-                    'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
-                    # Brazil
-                    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
-                    # Japan
-                    'co.jp', 'or.jp', 'ne.jp', 'go.jp', 'ac.jp',
-                    # Korea
-                    'co.kr', 'or.kr', 'ne.kr', 'go.kr', 'ac.kr',
-                    # India
-                    'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in',
-                    # Asia/Pacific
-                    'com.sg', 'com.hk', 'com.tw', 'com.my', 'com.ph', 'com.vn', 'com.kh',
-                    # Americas
-                    'com.mx', 'com.ar', 'com.co', 'com.ve', 'com.pe', 'com.pr', 'com.bz', 'com.sv',
-                    # Europe
-                    'com.pl', 'com.tr', 'com.ua', 'com.ru',
-                    # Middle East/Africa
-                    'com.sa', 'com.eg', 'com.ng', 'com.gh', 'com.ke', 'com.ge',
-                    # Other
-                    'com.pk', 'com.bd', 'com.np'
-                ]
-
-                # Check if domain ends with multi-part TLD
-                if len(parts) >= 3:
-                    last_two_parts = '.'.join(parts[-2:])
-                    if last_two_parts in multi_part_tlds:
-                        apex = '.'.join(parts[-3:])
-
-                        # Validate: ensure the third-level part is not empty and not just a number
-                        third_level = parts[-3]
-                        if not third_level or len(third_level) < 2 or third_level.isdigit():
-                            return ""  # Invalid
-
-                        # Filter out infrastructure providers
-                        if apex in infrastructure_providers:
-                            return ""  # Blacklisted
-
-                        return apex
-
-                # Standard TLD - return last 2 parts (domain.tld)
-                apex = '.'.join(parts[-2:])
-
-                # Validate: ensure the second-level part is not empty and not just a number
-                second_level = parts[-2]
-                if not second_level or len(second_level) < 2 or second_level.isdigit():
-                    return ""  # Invalid
-
-                # Filter out infrastructure providers
-                if apex in infrastructure_providers:
-                    return ""  # Blacklisted
-
-                return apex
-
-            # Extract unique APEX domains only (no subdomains)
-            apex_domains = set()
-            original_apex = extract_apex_domain(domain)
-
-            # Process certificates to find related apex domains
-            for cert in certificates:
-                # Extract from common_name
-                if cert.get("common_name"):
-                    clean_domain = (
-                        cert["common_name"]
-                        .replace("*.", "")
-                        .lower()
-                        .strip()
-                    )
-
-                    apex = extract_apex_domain(clean_domain)
-
-                    # Only include apex domains that are different from the original
-                    if apex and apex != original_apex and len(apex) >= 3:
-                        apex_domains.add(apex)
-
-                # Extract from Subject Alternative Names (SANs)
-                if cert.get("name_value"):
-                    sans = cert["name_value"].split('\n')
-                    for san in sans:
-                        clean_domain = (
-                            san.replace("*.", "")
-                            .lower()
-                            .strip()
-                        )
-
-                        apex = extract_apex_domain(clean_domain)
-
-                        # Only include apex domains that are different from the original
-                        if apex and apex != original_apex and len(apex) >= 3:
-                            apex_domains.add(apex)
-
-            # Limit to top 10 unique apex domains
-            related_domains_array = list(apex_domains)[:10]
-
+            logger.info(f"crt.sh: Found {len(certificates)} certificates for {domain}")
             return {
                 "success": True,
                 "data": {
                     "certificates": certificates,
-                    "relatedDomains": related_domains_array
+                    "relatedDomains": related_domains
                 }
             }
 
     except httpx.TimeoutException:
+        logger.error(f"crt.sh timeout for {domain}")
         return {
             "success": False,
-            "error": "Request timeout",
+            "error": "crt.sh timeout",
             "data": {
                 "certificates": [],
                 "relatedDomains": []
             }
         }
     except Exception as e:
+        logger.error(f"crt.sh error for {domain}: {str(e)}")
         return {
             "success": False,
-            "error": str(e),
+            "error": f"crt.sh error: {str(e)}",
             "data": {
                 "certificates": [],
                 "relatedDomains": []
             }
         }
+
+
+async def fetch_certspotter(domain: str) -> Dict:
+    """
+    Fetch Certificate Transparency logs from CertSpotter
+
+    Args:
+        domain: Domain name to query
+
+    Returns:
+        Dict with success status, certificates data (in crt.sh format), and related domains
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"https://api.certspotter.com/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names",
+                headers={
+                    "User-Agent": "StrivyrSurvey/1.0",
+                    "Accept": "application/json"
+                }
+            )
+
+            if response.status_code != 200:
+                logger.error(f"CertSpotter returned {response.status_code} for {domain}")
+                return {
+                    "success": False,
+                    "error": f"CertSpotter error ({response.status_code})",
+                    "data": {
+                        "certificates": [],
+                        "relatedDomains": []
+                    }
+                }
+
+            certspotter_data = response.json()
+
+            # Convert CertSpotter format to crt.sh format for consistency
+            certificates = []
+            for cert in certspotter_data:
+                # Extract DNS names from the cert
+                dns_names = cert.get("dns_names", [])
+                name_value = "\n".join(dns_names) if dns_names else ""
+
+                # Get the first DNS name as common_name
+                common_name = dns_names[0] if dns_names else ""
+
+                # Convert to crt.sh format
+                converted_cert = {
+                    "issuer_name": cert.get("issuer", {}).get("name", ""),
+                    "common_name": common_name,
+                    "name_value": name_value,
+                    "id": cert.get("id", ""),
+                    "entry_timestamp": cert.get("not_before", "")
+                }
+                certificates.append(converted_cert)
+
+            related_domains = filter_and_validate_domains(certificates, domain)
+
+            logger.info(f"CertSpotter: Found {len(certificates)} certificates for {domain}")
+            return {
+                "success": True,
+                "data": {
+                    "certificates": certificates,
+                    "relatedDomains": related_domains
+                }
+            }
+
+    except httpx.TimeoutException:
+        logger.error(f"CertSpotter timeout for {domain}")
+        return {
+            "success": False,
+            "error": "CertSpotter timeout",
+            "data": {
+                "certificates": [],
+                "relatedDomains": []
+            }
+        }
+    except Exception as e:
+        logger.error(f"CertSpotter error for {domain}: {str(e)}")
+        return {
+            "success": False,
+            "error": f"CertSpotter error: {str(e)}",
+            "data": {
+                "certificates": [],
+                "relatedDomains": []
+            }
+        }
+
+
+@app.post("/api/ct-logs")
+async def ct_logs_proxy(request: DomainRequest, req: Request):
+    """
+    Proxy endpoint for Certificate Transparency logs with fallback
+    Tries crt.sh first, falls back to CertSpotter if crt.sh is unavailable
+    """
+    # Rate limiting check
+    client_ip = req.client.host
+    check_rate_limit(client_ip)
+
+    domain = request.domain
+
+    # Try crt.sh first
+    logger.info(f"CT logs lookup for {domain}: trying crt.sh")
+    crtsh_result = await fetch_crtsh(domain)
+
+    if crtsh_result["success"]:
+        logger.info(f"CT logs lookup for {domain}: crt.sh succeeded")
+        return crtsh_result
+
+    # If crt.sh failed, try CertSpotter as fallback
+    logger.info(f"CT logs lookup for {domain}: crt.sh failed, trying CertSpotter fallback")
+    certspotter_result = await fetch_certspotter(domain)
+
+    if certspotter_result["success"]:
+        logger.info(f"CT logs lookup for {domain}: CertSpotter succeeded")
+        return certspotter_result
+
+    # Both services failed - return error
+    logger.error(f"CT logs lookup for {domain}: both crt.sh and CertSpotter failed")
+    return {
+        "success": False,
+        "error": "Certificate Transparency services temporarily unavailable",
+        "data": {
+            "certificates": [],
+            "relatedDomains": []
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
