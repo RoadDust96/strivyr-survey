@@ -35,7 +35,7 @@ app.add_middleware(
 
 # Rate limiting configuration
 rate_limit_store = defaultdict(list)
-MAX_REQUESTS = 30  # Max 30 requests per IP
+MAX_REQUESTS = 50  # Max 30 requests per IP
 TIME_WINDOW = 60  # Per 60 seconds (1 minute)
 
 def check_rate_limit(client_ip: str):
