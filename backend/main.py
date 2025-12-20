@@ -446,7 +446,7 @@ def filter_and_validate_domains(certificates: List[Dict], original_domain: str) 
         original_domain: The original queried domain to exclude
 
     Returns:
-        List of unique apex domains (max 10)
+        List of unique apex domains (max 50)
     """
     apex_domains = set()
     original_apex = extract_apex_domain(original_domain)
@@ -485,7 +485,7 @@ def filter_and_validate_domains(certificates: List[Dict], original_domain: str) 
                     apex_domains.add(apex)
 
     # Limit to top 10 unique apex domains
-    return list(apex_domains)[:10]
+    return list(apex_domains)[:50]
 
 
 async def fetch_crtsh(domain: str) -> Dict:
