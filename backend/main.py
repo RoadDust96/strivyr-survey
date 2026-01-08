@@ -277,12 +277,25 @@ async def reverse_ip_lookup(request: IPRequest, req: Request):
             # Remove duplicates
             unique_domains = list(set(domains))
 
+            # Filter out shared hosting IPs (40+ domains indicates cloud/shared hosting)
+            if len(unique_domains) >= 40:
+                return {
+                    "success": True,
+                    "data": {
+                        "domains": []
+                    },
+                    "error": None,
+                    "filtered": True,
+                    "reason": f"Skipped {len(unique_domains)} domains - likely shared/cloud hosting IP"
+                }
+
             return {
                 "success": True,
                 "data": {
                     "domains": unique_domains
                 },
-                "error": None
+                "error": None,
+                "filtered": False
             }
 
     except httpx.TimeoutException:
